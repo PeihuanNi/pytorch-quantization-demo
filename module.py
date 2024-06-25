@@ -155,7 +155,7 @@ class QConv2d(QModule):
         self.conv_module.weight.data = self.conv_module.weight.data - self.qw.zero_point
 
         self.conv_module.bias.data = quantize_tensor(self.conv_module.bias.data, scale=self.qi.scale * self.qw.scale,
-                                                     zero_point=0, num_bits=32, signed=True)
+                                                     zero_point=128, num_bits=8, signed=False)
 
     def forward(self, x):
         if hasattr(self, 'qi'):
@@ -215,7 +215,7 @@ class QLinear(QModule):
         self.fc_module.weight.data = self.qw.quantize_tensor(self.fc_module.weight.data)
         self.fc_module.weight.data = self.fc_module.weight.data - self.qw.zero_point
         self.fc_module.bias.data = quantize_tensor(self.fc_module.bias.data, scale=self.qi.scale * self.qw.scale,
-                                                   zero_point=0, num_bits=32, signed=True)
+                                                   zero_point=128, num_bits=8, signed=True)
 
     def forward(self, x):
         if hasattr(self, 'qi'):
