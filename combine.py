@@ -3,25 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 
-def calcScaleZeropoint(rmin, rmax, qmin=0, qmax=255):
+def calcScaleZeropoint(rmin, rmax, num_bits=8):
+    qmax = 2. ** num_bits -1.
+    qmin = 0
     scale = (rmax - rmin) / (qmax - qmin)
     zero_point = torch.round(qmax - rmax / scale)
     return scale, zero_point
 
-def quant(tensor, scale, zero_point, qmin=0, qmax=255):
+def quantize_tensor(tensor, scale, zero_point, num_bits=8, signed=False):
+    if signed:
+        qmin = -2. ** (num_bits-1)
+        qmax = 2. ** (num_bits-1) -1
+    else:
+        qmin = 0
+        qmax = 2. ** num_bits -1.
     q = tensor / scale + zero_point
     q.round_().clamp_(qmin, qmax)
     return q
 
-def dequant(q, scale, zero_point):
+def dequantize_tensor(q, scale, zero_point):
     r = (q - zero_point) * scale
     return r
 
 
 class Qparam:
-    def __init__(self, qmin, qmax):
-        self.qmin = qmin
-        self.qmax = qmax
+    def __init__(self, num_bits):
+        self.num_bits = num_bits
         self.scale = None
         self.zero_point = None
         self.rmin = None
@@ -30,23 +37,23 @@ class Qparam:
     def update(self, tensor):
         self.rmin = tensor.min()
         self.rmax = tensor.max()
-        self.scale, self.zero_point = calcScaleZeropoint(self.rmin, self.rmax, qmin=self.qmin, qmax=self.qmax)
+        self.scale, self.zero_point = calcScaleZeropoint(self.rmin, self.rmax, num_bits=self.num_bits)
 
 
-    def quant(self, tensor):
-        return quant(tensor, self.scale, self.zero_point, qmin=self.qmin, qmax=self.qmax)
+    def quantize_tensor(self, tensor):
+        return quantize_tensor(tensor, self.scale, self.zero_point, num_bits=self.num_bits)
 
-    def dequant(self, q):
-        return dequant(q, self.scale, self.zero_point)
+    def dequantize_tensor(self, q):
+        return dequantize_tensor(q, self.scale, self.zero_point)
     
 
 class QModule(nn.Module):
-    def __init__(self, qi, qo, qmin, qmax):
+    def __init__(self, qi=True, qo=True, num_bits=8):
         super(QModule, self).__init__()
         if qi:
-            self.qi = Qparam(qmin, qmax)
+            self.qi = Qparam(num_bits=num_bits)
         if qo:
-            self.qo = Qparam(qmin, qmax)
+            self.qo = Qparam(num_bits=num_bits)
 
     def freeze(self):
         raise NotImplementedError('freeze should be implement')
@@ -56,18 +63,16 @@ class QModule(nn.Module):
     
 
 class QConv2d(QModule):
-    def __init__(self, conv_module, qmin, qmax, qi=True, qo=True):
+    def __init__(self, conv_module, num_bits=8, qi=True, qo=True):
         """
         继承QModule的init,当传入根据传入的qi和qo来判断是否有创建的qi和qo
         实际上只有第一个qconv块需要qi,其余都是复用上一个块的qo
         注意这里只需要在初始化是给出需不需要qi和qo即可
         """
-        super(QConv2d, self).__init__(qi=qi, qo=qo, qmin=qmin, qmax=qmax)
-        self.qmin = qmin
-        self.qmax = qmax
+        super(QConv2d, self).__init__(qi=qi, qo=qo, num_bits=num_bits)
+        self.num_bits=num_bits
         self.conv_module = conv_module
-        self.qw = Qparam(self.qmin, self.qmax)
-        self.register_buffer('M', torch.tensor([], requires_grad=False))
+        self.qw = Qparam(num_bits=self.num_bits)
 
     
     def freeze(self, qi=None, qo=None):
@@ -79,13 +84,12 @@ class QConv2d(QModule):
         if qo is not None:
             self.qo = qo
         # 计算M
-        self.M.data = self.qi.scale * self.qw.scale / self.qo.scale
+        self.M = self.qi.scale * self.qw.scale / self.qo.scale
         # 计算weight量化
-        self.conv_module.weight.data = self.qw.quant(self.conv_module.weight.data)
-        self.conv_module.weight.data = self.conv_module.weight.data - self.qw.zero_point
+        self.conv_module.weight.data = self.qw.quantize_tensor(self.conv_module.weight.data)
         # print(self.conv_module.weight.data)
         # 计算bias量化
-        self.conv_module.bias.data = quant(self.conv_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
+        self.conv_module.bias.data = quantize_tensor(self.conv_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, num_bits=self.num_bits)
 
     def forward(self, x):
         """
@@ -96,35 +100,34 @@ class QConv2d(QModule):
         # 如果有qi，则计算x的量化参数，并直接fake quant
         if hasattr(self, 'qi'):
             self.qi.update(x)
-            x = self.qi.quant(x)
-            x = self.qi.dequant(x)
+            x = self.qi.quantize_tensor(x)
+            x = self.qi.dequantize_tensor(x)
         # 计算conv的量化参数w和b
         self.qw.update(self.conv_module.weight.data)
-        self.conv_module.weight.data = self.qw.quant(self.conv_module.weight.data)
-        self.conv_module.weight.data = self.qw.dequant(self.conv_module.weight.data)
+        self.conv_module.weight.data = self.qw.quantize_tensor(self.conv_module.weight.data)
+        self.conv_module.weight.data = self.qw.dequantize_tensor(self.conv_module.weight.data)
         # fake quant后计算conv
         x = self.conv_module(x)
 
         # 如果有自己的qo，则计算qo的量化参数
         if hasattr(self, 'qo'):
             self.qo.update(x)
-            x = self.qo.quant(x)
-            x = self.qo.dequant(x)
+            x = self.qo.quantize_tensor(x)
+            x = self.qo.dequantize_tensor(x)
         return x
     
     def quantize_inference(self, x):
         """量化推理时调用"""
+        self.conv_module.weight.data = self.conv_module.weight.data - self.qw.zero_point
         x = x - self.qi.zero_point
         x = self.conv_module(x)
         x = self.M * x + self.qo.zero_point
-        x.clamp_(self.qmin, self.qmax).round_()
         return x
     
 class QReLU(QModule):
-    def __init__(self, relu_module, qi=False, qo=True, qmin=0, qmax=255):
-        super(QReLU, self).__init__(qi=qi, qo=qo, qmin=qmin, qmax=qmax)
-        self.qmin = qmin
-        self.qmax = qmax
+    def __init__(self, relu_module, qi=False, qo=True, num_bits=8):
+        super(QReLU, self).__init__(qi=qi, qo=qo, num_bits=num_bits)
+        self.num_bits = num_bits
         self.relu_module = relu_module
 
     def freeze(self, qi=None, qo=None):
@@ -136,8 +139,8 @@ class QReLU(QModule):
     def forward(self, x):
         if hasattr(self, 'qi'):
             self.qi.update(x)
-            x = self.qi.quant(x)
-            x = self.qi.dequant(x)
+            x = self.qi.quantize_tensor(x)
+            x = self.qi.dequantize_tensor(x)
         x = self.relu_module(x)
         return x
 
@@ -147,13 +150,11 @@ class QReLU(QModule):
     
 
 class QLinear(QModule):
-    def __init__(self, linear_module, qi=True, qo=True, qmin=0, qmax=255):
-        super(QLinear, self).__init__(qi=qi, qo=qo, qmin=qmin, qmax=qmax)
-        self.qmin = qmin
-        self.qmax = qmax
+    def __init__(self, linear_module, qi=True, qo=True, num_bits=8):
+        super(QLinear, self).__init__(qi=qi, qo=qo, num_bits=num_bits)
+        self.num_bits = num_bits
         self.linear_module = linear_module
-        self.qw = Qparam(self.qmin, self.qmax)
-        self.register_buffer('M', torch.tensor([], requires_grad=False))
+        self.qw = Qparam(num_bits=num_bits)
 
     def freeze(self, qi=None, qo=None):
         if qi is not None:
@@ -161,30 +162,30 @@ class QLinear(QModule):
         if qo is not None:
             self.qo = qo
 
-        self.M.data = self.qi.scale * self.qw.scale / self.qo.scale
+        self.M = self.qi.scale * self.qw.scale / self.qo.scale
 
-        self.linear_module.weight.data = self.qw.quant(self.linear_module.weight.data)
-        self.linear_module.weight.data = self.linear_module.weight.data - self.qw.zero_point
+        self.linear_module.weight.data = self.qw.quantize_tensor(self.linear_module.weight.data)
 
-        self.linear_module.bias.data = quant(self.linear_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
+        self.linear_module.bias.data = quantize_tensor(self.linear_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, num_bits=self.num_bits)
 
     def forward(self, x):
         if hasattr(self, 'qi'):
             self.qi.update(x)
-            x = self.qi.quant(x)
-            x = self.qi.dequant(x)
+            x = self.qi.quantize_tensor(x)
+            x = self.qi.dequant_tensor(x)
         self.qw.update(self.linear_module.weight.data)
-        self.linear_module.weight.data = self.qw.quant(self.linear_module.weight.data)
-        self.linear_module.weight.data = self.qw.dequant(self.linear_module.weight.data)
+        self.linear_module.weight.data = self.qw.quantize_tensor(self.linear_module.weight.data)
+        self.linear_module.weight.data = self.qw.dequantize_tensor(self.linear_module.weight.data)
         x = self.linear_module(x)
         if hasattr(self, 'qo'):
             self.qo.update(x)
-            x = self.qo.quant(x)
-            x = self.qo.dequant(x)
+            x = self.qo.quantize_tensor(x)
+            x = self.qo.dequantize_tensor(x)
 
         return x
     
     def quantize_inference(self, x):
+        self.linear_module.weight.data = self.linear_module.weight.data - self.qw.zero_point
         x = x - self.qi.zero_point
         x = self.linear_module(x)
         x = self.M * x + self.qo.zero_point
@@ -192,10 +193,9 @@ class QLinear(QModule):
         
 
 class QMaxPool2d(QModule):
-    def __init__(self, maxpool_module, qi=True, qo=False, qmin=0, qmax=255):
-        super(QMaxPool2d, self).__init__(qi=qi, qo=qo, qmin=qmin, qmax=qmax)
-        self.qmin = qmin
-        self.qmax = qmax
+    def __init__(self, maxpool_module, qi=True, qo=False, num_bits=8):
+        super(QMaxPool2d, self).__init__(qi=qi, qo=qo, num_bits=num_bits)
+        self.num_bits = num_bits
         self.maxpool_module = maxpool_module
 
     def freeze(self, qi=None, qo=None):
@@ -207,14 +207,16 @@ class QMaxPool2d(QModule):
     def forward(self, x):
         if hasattr(self, 'qi'):
             self.qi.update(x)
-            x = self.qi.quant(x)
-            x = self.qi.dequant(x)
+            x = self.qi.quantize_tensor(x)
+            x = self.qi.dequantize_tensor(x)
         x = self.maxpool_module(x)
         return x
     
     def quantize_inference(self, x):
         x = self.maxpool_module(x)
         return x
+    
+
 
 class Net(nn.Module):
     def __init__(self, num_channels=1):
@@ -238,15 +240,15 @@ class Net(nn.Module):
         x = self.fc(x)
         return x
 
-    def quantize(self, qmin=0, qmax=255):
+    def quantize(self, num_bits=8):
         """实例化量化层"""
-        self.qconv1 = QConv2d(self.conv1, qmin=qmin, qmax=qmax, qi=True, qo=True)
-        self.qrelu1 = QReLU(self.relu, qi=False, qo=False, qmin=qmin, qmax=qmax)
-        self.qmaxpool2d1 = QMaxPool2d(self.maxpool, qi=False, qo=False, qmin=qmin, qmax=qmax)
-        self.qconv2 =QConv2d(self.conv2, qmin=qmin, qmax=qmax, qi=False, qo=True)
-        self.qrelu2 = QReLU(self.relu, qi=False, qo=False, qmin=qmin, qmax=qmax)
-        self.qmaxpool2d2 = QMaxPool2d(self.maxpool, qi=False, qo=False, qmin=qmin, qmax=qmax)
-        self.qfc = QLinear(self.fc, qi=False, qo=True, qmin=qmin, qmax=qmax)
+        self.qconv1 = QConv2d(self.conv1, num_bits=num_bits, qi=True, qo=True)
+        self.qrelu1 = QReLU(self.relu, qi=False, qo=False, num_bits=num_bits)
+        self.qmaxpool2d1 = QMaxPool2d(self.maxpool, qi=False, qo=False, num_bits=num_bits)
+        self.qconv2 =QConv2d(self.conv2, num_bits=num_bits, qi=False, qo=True)
+        self.qrelu2 = QReLU(self.relu, qi=False, qo=False, num_bits=num_bits)
+        self.qmaxpool2d2 = QMaxPool2d(self.maxpool, qi=False, qo=False, num_bits=num_bits)
+        self.qfc = QLinear(self.fc, qi=False, qo=True, num_bits=num_bits)
 
     def quantize_forward(self, x):
         """
@@ -274,7 +276,7 @@ class Net(nn.Module):
         self.qfc.freeze(qi=self.qconv2.qo)
 
     def quantize_inference(self, x):
-        qx = self.qconv1.qi.quant(x)
+        qx = self.qconv1.qi.quantize_tensor(x)
         qx = self.qconv1.quantize_inference(qx)
         qx = self.qrelu1.quantize_inference(qx)
         qx = self.qmaxpool2d1.quantize_inference(qx)
@@ -283,7 +285,7 @@ class Net(nn.Module):
         qx = self.qmaxpool2d2.quantize_inference(qx)
         qx = qx.view(-1, 5*5*40)
         qx = self.qfc.quantize_inference(qx)
-        out = self.qfc.qo.dequant(qx)
+        out = self.qfc.qo.dequantize_tensor(qx)
         return out
 
 
@@ -315,7 +317,7 @@ def quantize_inference(model, test_loader):
 model = Net()
 model.load_state_dict(torch.load('ckpt/mnist_cnn_groups20.pt'))
 model = model.to('cuda')
-model.quantize(qmin=0, qmax=255)
+model.quantize(num_bits=8)
 
 train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('data', train=True, download=True, 
@@ -337,10 +339,9 @@ test_loader = torch.utils.data.DataLoader(
 direct_quantize(model, train_loader)
 
 model.freeze()
-
+print(model.qconv1.conv_module.weight[:2].data)
 quantize_inference(model, test_loader)
-
-# print(model.qconv1.conv_module.weight[:2].data)
-# print(model.qconv1.qw.zero_point.data)
-# for name, param in model.named_parameters():
-#     print(f"Layer: {name} | Size: {param.size()} | Values: {param[:2]}")  # 只显示前两个值以避免过多输出
+print(model.qconv1.conv_module.weight[:2].data)
+print(model.qconv1.qw.zero_point.data)
+for name, param in model.named_parameters():
+    print(f"Layer: {name} | Size: {param.size()} | Values: {param[:2]}")  # 只显示前两个值以避免过多输出
