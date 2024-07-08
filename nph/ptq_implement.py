@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import datasets, transforms
 
 def calcScaleZeropoint(rmin, rmax, qmin=0, qmax=255):
@@ -67,7 +66,6 @@ class QConv2d(QModule):
         self.qmax = qmax
         self.conv_module = conv_module
         self.qw = Qparam(self.qmin, self.qmax)
-        self.register_buffer('M', torch.tensor([], requires_grad=False))
 
     
     def freeze(self, qi=None, qo=None):
@@ -79,7 +77,7 @@ class QConv2d(QModule):
         if qo is not None:
             self.qo = qo
         # 计算M
-        self.M.data = self.qi.scale * self.qw.scale / self.qo.scale
+        self.M = self.qi.scale * self.qw.scale / self.qo.scale
         # 计算weight量化
         self.conv_module.weight.data = self.qw.quant(self.conv_module.weight.data)
         self.conv_module.weight.data = self.conv_module.weight.data - self.qw.zero_point
