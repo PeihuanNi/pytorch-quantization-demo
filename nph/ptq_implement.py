@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Dataset
 
 def calcScaleZeropoint(rmin, rmax, qmin=0, qmax=255):
     scale = (rmax - rmin) / (qmax - qmin)
@@ -83,7 +84,7 @@ class QConv2d(QModule):
         self.conv_module.weight.data = self.conv_module.weight.data - self.qw.zero_point
         # print(self.conv_module.weight.data)
         # 计算bias量化
-        self.conv_module.bias.data = quant(self.conv_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
+        # self.conv_module.bias.data = quant(self.conv_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
 
     def forward(self, x):
         """
@@ -164,7 +165,7 @@ class QLinear(QModule):
         self.linear_module.weight.data = self.qw.quant(self.linear_module.weight.data)
         self.linear_module.weight.data = self.linear_module.weight.data - self.qw.zero_point
 
-        self.linear_module.bias.data = quant(self.linear_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
+        # self.linear_module.bias.data = quant(self.linear_module.bias.data, self.qi.scale*self.qw.scale, zero_point=128, qmin=self.qmin, qmax=self.qmax)
 
     def forward(self, x):
         if hasattr(self, 'qi'):
@@ -218,9 +219,9 @@ class Net(nn.Module):
     def __init__(self, num_channels=1):
         """实例化出模型包含的层"""
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=num_channels, out_channels=40, kernel_size=3, stride=1)
-        self.conv2 = nn.Conv2d(in_channels=40, out_channels=40, kernel_size=3, stride=1, groups=20)
-        self.fc = nn.Linear(5*5*40, 10)
+        self.conv1 = nn.Conv2d(in_channels=num_channels, out_channels=40, kernel_size=3, stride=1, bias=False)
+        self.conv2 = nn.Conv2d(in_channels=40, out_channels=40, kernel_size=3, stride=1, groups=20, bias=False)
+        self.fc = nn.Linear(5*5*40, 10, bias=False)
         self.relu = nn.ReLU()
         self.maxpool = nn.MaxPool2d(2, 2)
 
@@ -302,7 +303,7 @@ def direct_quantize(model, test_loader):
 
 def quantize_inference(model, test_loader):
     correct = 0
-    for i, (data, target) in enumerate(test_loader, 1):
+    for _, (data, target) in enumerate(test_loader, 1):
         data, target = data.to('cuda'), target.to('cuda')
         output = model.quantize_inference(data)
         pred = output.argmax(dim=1, keepdim=True)
@@ -311,20 +312,21 @@ def quantize_inference(model, test_loader):
 
 
 model = Net()
-model.load_state_dict(torch.load('ckpt/mnist_cnn_groups20.pt'))
+# model.load_state_dict(torch.load('model_weights.pth'))
+model = torch.load('model.pth')
 model = model.to('cuda')
 model.quantize(qmin=0, qmax=255)
 
-train_loader = torch.utils.data.DataLoader(
+train_loader = DataLoader(
         datasets.MNIST('data', train=True, download=True, 
                        transform=transforms.Compose([
                             transforms.ToTensor(),
                             transforms.Normalize((0.1307,), (0.3081,))
                        ])),
-        batch_size=64, shuffle=True,pin_memory=True
+        batch_size=64, shuffle=True, pin_memory=True
     )
 
-test_loader = torch.utils.data.DataLoader(
+test_loader = DataLoader(
   datasets.MNIST('data', train=False, transform=transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.1307,), (0.3081,))
