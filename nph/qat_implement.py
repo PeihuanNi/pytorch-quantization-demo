@@ -47,10 +47,11 @@ class QConv2d(QModule):
         self.qi = Qparam(qmin, qmax)
         self.qo = Qparam(qmin, qmax)
 
-    def forward(self, x):
+    def forward(self, x):  
         if self.training:
             self.qi.update(x)
             self.qw.update(self.conv.weight.data)
+            
             # x = self.qi.dequant(self.qi.quant(x))
             x = self.qi.quant(x)
             # self.conv.weight.data = self.qw.dequant(self.qw.quant(self.conv.weight.data))
