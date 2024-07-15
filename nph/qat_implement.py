@@ -58,13 +58,17 @@ class QConv2d(QModule):
             self.conv.weight.data = self.qw.quant(self.conv.weight.data)
             x = self.conv(x)
             x = x / self.qi.scale / self.qw.scale
+            self.comv.weight.data = self.qw.dequant(self.conv.weight.data)
             self.qo.update(x)
             x = self.qo.dequant(self.qo.quant(x))
         else:
-            x = self.qi.dequant(self.qi.quant(x))
-            self.conv.weight.data = self.qw.dequant(self.qw.quant(self.conv.weight.data))
+            # x = self.qi.dequant(self.qi.quant(x))
+            x = self.qi.quant(x)
+            # self.conv.weight.data = self.qw.dequant(self.qw.quant(self.conv.weight.data))
+            self.conv.weight.data = self.qw.quant(self.conv.weight.data)
             x = self.conv(x)
-            x = self.qo.dequant(self.qo.quant(x))
+            x = x / self.qi.scale / self.qw.quant
+            # x = self.qo.dequant(self.qo.quant(x))
         return x
 
 
@@ -89,16 +93,22 @@ class QLinear(QModule):
         if self.training:
             self.qi.update(x)
             self.qw.update(self.linear.weight.data)
-            x = self.qi.dequant(self.qi.quant(x))
-            self.linear.weight.data = self.qw.dequant(self.qw.quant(self.linear.weight.data))
+            # x = self.qi.dequant(self.qi.quant(x))
+            x = self.qi.quant(x)
+            # self.linear.weight.data = self.qw.dequant(self.qw.quant(self.linear.weight.data))
+            self.linear.weight.data = self.qw.quant(self.linear.weight.data)
             x = self.linear(x)
+            x = x / self.qi.scale / self.qw.scale
             self.qo.update(x)
             x = self.qo.dequant(self.qo.quant(x))
         else:
-            x = self.qi.dequant(self.qi.quant(x))
-            self.linear.weight.data = self.qw.dequant(self.qw.quant(self.linear.weight.data))
+            # x = self.qi.dequant(self.qi.quant(x))
+            x = self.qi.quant(x)
+            # self.linear.weight.data = self.qw.dequant(self.qw.quant(self.linear.weight.data))
+            self.linear.weight.data = self.qw.quant(self.linear.weight.data)
             x = self.linear(x)
-            x = self.qo.dequant(self.qo.quant(x))
+            x = x / self.qi.quant / self.qw.quant
+            # x = self.qo.dequant(self.qo.quant(x))
         return x
 
 
