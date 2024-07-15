@@ -1,9 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
 
 class Residual(nn.Module):
     def __init__(self, input_channels, num_channesls, use1x1conv=False, strides=1):
@@ -92,10 +91,72 @@ class ResNet18(nn.Module):
         return out
 
 
-Net = ResNet18()
 
-X = torch.rand(1, 1, 224, 224)
-for name, module in Net.named_children():
-    print(name)
-    X = module(X)
-    print(X.shape)
+# X = torch.rand(1, 1, 224, 224)
+# for name, module in Net.named_children():
+#     print(name)
+#     X = module(X)
+#     print(X.shape)
+
+batch_size = 64
+learning_rate = 0.001
+num_epochs = 10
+
+# Data transformations
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
+
+# Load datasets
+train_dataset = datasets.FashionMNIST(root='./data', train=True, transform=transform, download=True)
+test_dataset = datasets.FashionMNIST(root='./data', train=False, transform=transform, download=True)
+
+# Data loaders
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+# Initialize model, loss function, and optimizer
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = ResNet18().to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+# Training loop
+for epoch in range(num_epochs):
+    model.train()
+    running_loss = 0.0
+    for i, (images, labels) in enumerate(train_loader):
+        images, labels = images.to(device), labels.to(device)
+
+        # Zero the parameter gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        # Backward pass and optimize
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        if (i+1) % 100 == 0:
+            print(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}')
+
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader):.4f}')
+
+# Testing loop
+model.eval()
+with torch.no_grad():
+    correct = 0
+    total = 0
+    for images, labels in test_loader:
+        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+
+    print(f'Accuracy of the model on the test images: {100 * correct / total} %')
