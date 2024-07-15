@@ -182,7 +182,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     train_loader = DataLoader(
-        datasets.MNIST('data', train=True, download=True,
+        datasets.MNIST(root='D:/Dataset', train=True, download=False,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))
@@ -191,10 +191,11 @@ if __name__ == "__main__":
     )
 
     test_loader = DataLoader(
-        datasets.MNIST('data', train=False, transform=transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
-        ])),
+        datasets.MNIST(root='D:/Dataset', train=False, download=False,
+                       transform=transforms.Compose([
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.1307,), (0.3081,))
+                        ])),
         batch_size=test_batch_size, shuffle=False, num_workers=4, pin_memory=True
     )
 
