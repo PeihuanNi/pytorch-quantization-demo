@@ -4,6 +4,7 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
+
 class Qparam:
     def __init__(self, qmin, qmax):
         self.qmin = qmin
@@ -111,15 +112,29 @@ class QLinear(QModule):
             # x = self.qo.dequant(self.qo.quant(x))
         return x
 
+class QMaxPool2d(QModule):
+    def __init__(self, maxpool_module, qi=True, qo=False, qmin=0, qmax=255):
+        super(QMaxPool2d, self).__init__(qi=qi, qo=qo, qmin=qmin, qmax=qmax)
+        self.qmin = qmin
+        self.qmax = qmax
+        self.maxpool_module = maxpool_module
+    
+    def forward(self, x):
+        if hasattr(self, 'qi'):
+            self.qi.update(x)
+            x = self.qi.quant(x)
+            x = self.qi.dequant(x)
+        x = self.maxpool_module(x)
+        return x
 
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=40, kernel_size=3, stride=1, bias=False)
-        self.conv2 = nn.Conv2d(in_channels=40, out_channels=40, kernel_size=3, stride=1, groups=20, bias=False)
-        self.fc = nn.Linear(5*5*40, 10, bias=False)
-        self.relu = nn.ReLU()
-        self.maxpool = nn.MaxPool2d(2, 2)
+        self.conv1 = QConv2d(nn.Conv2d(in_channels=1, out_channels=40, kernel_size=3, stride=1, bias=False))
+        self.conv2 = QConv2d(nn.Conv2d(in_channels=40, out_channels=40, kernel_size=3, stride=1, groups=20, bias=False))
+        self.fc = QLinear(nn.Linear(5*5*40, 10, bias=False))
+        self.relu = QReLU(nn.ReLU())
+        self.maxpool = QMaxPool2d(nn.MaxPool2d(2, 2))
 
     def forward(self, x):
         """前向传播函数"""
